@@ -8,8 +8,7 @@ export default defineSchema({
         email:v.string(),
         credits:v.number(),
         subscriptionId:v.optional(v.string())
-    })
-    /*,
+    }),
 
     DiscussionRoom:defineTable({
         coachingOption:v.string(),
@@ -18,5 +17,5 @@ export default defineSchema({
         conversation:v.optional(v.any())
 
 
-    })*/
+    })
 })
