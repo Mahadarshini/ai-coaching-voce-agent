@@ -21,6 +21,8 @@ function DiscussionRoom() {
     const recorder= useRef(null);
     const realtimeTranscriber=useRef(null);
     const [transcriptText, setTranscriptText] = useState('');
+    const [feedback, setFeedback] = useState('');
+    const [loadingFeedback, setLoadingFeedback] = useState(false);
     const chatEndRef = useRef(null);
     let silenceTimeOut;
 
@@ -44,7 +46,7 @@ function DiscussionRoom() {
         // Create the WebSocket connection to Deepgram
         const socket = new WebSocket(
           `wss://api.deepgram.com/v1/listen?punctuate=true&language=en`,
-          ["token", process.env.NEXT_PUBLIC_DEEPGRAM_API_KEY]
+          [],
         );
       
         // Store it in a ref
@@ -59,7 +61,7 @@ function DiscussionRoom() {
             .then((stream) => {
               recorder.current = new RecordRTC(stream, {
                 type: 'audio',
-                mimeType: 'audio/webm;codecs=pcm',
+                mimeType: 'audio/wav',
                 recorderType: RecordRTC.StereoAudioRecorder,
                 timeSlice: 250,
                 desiredSampRate: 16000,
@@ -76,8 +78,8 @@ function DiscussionRoom() {
       
                   const arrayBuffer = await blob.arrayBuffer();
                   const uint8Array = new Uint8Array(arrayBuffer);
-      
-                  console.log("📤 Sending audio data");
+                  console.log(arrayBuffer);
+                  //console.log("📤 Sending audio data");
                   realtimeTranscriber.current.send(uint8Array);
       
                   // Silence detection
@@ -100,7 +102,8 @@ function DiscussionRoom() {
           const data = JSON.parse(message.data);
           const transcript = data.channel?.alternatives[0]?.transcript;
           if (transcript && transcript.length > 0) {
-            setTranscriptText(prev => prev + ' ' + transcript);
+            console.log("📥 Full Deepgram Response:", data);
+            setTranscriptText('');
           }
         };
       
@@ -130,6 +133,11 @@ function DiscussionRoom() {
       
         setEnableMic(false);
         setTranscriptText('');
+          // Trigger feedback generation
+        if (transcriptText.length > 0) {
+        generateFeedback(transcriptText);
+  }
+
       };
       
 
@@ -161,7 +169,11 @@ function DiscussionRoom() {
                         
                         <h2>Chat Section</h2>
                         <div className="p-4 text-sm text-black w-full h-full overflow-y-scroll">
-                            {transcriptText || "Live transcription will appear here..."}
+                            {transcriptText
+                                ? transcriptText.split('. ').map((line, idx) => (
+                                    <p key={idx} className="mb-2">{line}</p>
+                                ))
+                                : "Live transcription will appear here..."}
                         </div>
                         <div ref={chatEndRef}></div>
 
