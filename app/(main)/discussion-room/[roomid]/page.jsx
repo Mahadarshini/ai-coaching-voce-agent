@@ -1,363 +1,294 @@
 "use client";
 import { Button } from '@/components/ui/button';
 import { api } from '@/convex/_generated/api';
-import { getToken } from '@/services/GlobalServices';
 import { CoachingExpert } from '@/services/Options';
+import { AIModel } from '@/services/GlobalServices';
 import { UserButton } from '@stackframe/stack';
 import { useQuery } from 'convex/react';
 import Image from 'next/image';
 import { useParams } from 'next/navigation';
-import React, { useEffect, useRef, useState } from 'react'
-import RecordRTC from 'recordrtc';
+import React, { useEffect, useRef, useState } from 'react';
 
 function DiscussionRoom() {
-    const {roomid} = useParams();
-    const DiscussionRoomData = useQuery(api.DiscussionRoom.GetDiscussionRoom, {id: roomid});
+    const { roomid } = useParams();
+    const DiscussionRoomData = useQuery(api.DiscussionRoom.GetDiscussionRoom, { id: roomid });
     const [expert, setExpert] = useState();
     const [enableMic, setEnableMic] = useState(false);
-    const [isRecording, setIsRecording] = useState(false);
-    const [transcribedText, setTranscribedText] = useState("");
+    const [isListening, setIsListening] = useState(false);
     const [chatMessages, setChatMessages] = useState([]);
     const [isProcessing, setIsProcessing] = useState(false);
-    const [debug, setDebug] = useState(""); // For displaying debug info
+    const [debug, setDebug] = useState("");
     
-    const recorder = useRef(null);
-    const streamRef = useRef(null);
-    const recordingTimer = useRef(null);
-    const silenceTimeOut = useRef(null);
+    // Web Speech API references
+    const recognitionRef = useRef(null);
+    const conversationHistoryRef = useRef([]);
+    
+    // Chat container ref for auto-scrolling
+    const chatContainerRef = useRef(null);
 
     useEffect(() => {
         if(DiscussionRoomData) {
-            const Expert = CoachingExpert.find(item => item.name == DiscussionRoomData.expertName);
-            console.log("Expert data:", Expert);
+            const Expert = CoachingExpert.find(item => item.name === DiscussionRoomData.expertName);
             setExpert(Expert);
         }
-    },[DiscussionRoomData]);
+    }, [DiscussionRoomData]);
+
+    // Auto-scroll chat to bottom when new messages are added
+    useEffect(() => {
+        if (chatContainerRef.current) {
+            chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+        }
+    }, [chatMessages]);
 
     // Cleanup on component unmount
     useEffect(() => {
         return () => {
-            if (streamRef.current) {
-                streamRef.current.getTracks().forEach(track => track.stop());
+            if (recognitionRef.current) {
+                recognitionRef.current.stop();
             }
-            if (recorder.current) {
-                recorder.current.stopRecording();
-            }
-            clearTimeout(silenceTimeOut.current);
-            clearTimeout(recordingTimer.current);
         };
     }, []);
 
-    // Log debug information
     const logDebug = (message) => {
         console.log(message);
         setDebug(prev => prev + "\n" + message);
     };
 
-    // Initialize the microphone and recorder
-    const startMicrophone = async () => {
+    const startSpeechRecognition = () => {
         try {
             setEnableMic(true);
             addMessageToChat("System", "Starting interview session...");
-            logDebug("Starting microphone...");
+            logDebug("Initializing Web Speech API...");
             
-            // Get user media stream
-            const stream = await navigator.mediaDevices.getUserMedia({ 
-                audio: { 
-                    echoCancellation: true,
-                    noiseSuppression: true,
-                    autoGainControl: true
-                } 
-            });
+            // Check if Speech Recognition is supported
+            if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+                throw new Error("Speech recognition not supported in this browser");
+            }
             
-            logDebug("Got media stream");
-            streamRef.current = stream;
+            // Initialize speech recognition
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            const recognition = new SpeechRecognition();
+            recognitionRef.current = recognition;
             
-            // Initialize recorder
-            recorder.current = new RecordRTC(stream, {
-                type: 'audio',
-                mimeType: 'audio/webm',
-                recorderType: RecordRTC.StereoAudioRecorder,
-                numberOfAudioChannels: 1,
-                desiredSampRate: 16000,
-            });
-            
-            logDebug("Recorder initialized");
-            
-            // Start recording
-            startRecording();
+            // Configure recognition settings
+            recognition.continuous = false; // Get complete thoughts as one result
+            recognition.interimResults = false; // Only get final results
+            recognition.lang = 'en-US'; // Set language
             
             // Add welcome message from interviewer
             setTimeout(() => {
-                addMessageToChat(expert?.name || "Interviewer", "Hello! Welcome to this interview. Please introduce yourself and tell me a bit about your experience.");
+                const welcomeMessage = "Hello! Welcome to this interview. Please introduce yourself and tell me a bit about your experience.";
+                addMessageToChat(expert?.name || "Interviewer", welcomeMessage);
+                conversationHistoryRef.current.push({ role: "assistant", content: welcomeMessage });
+                
+                // Start listening after welcome message
+                setTimeout(() => {
+                    startListening();
+                }, 1000);
             }, 1000);
             
         } catch (err) {
-            console.error("Error accessing microphone:", err);
-            logDebug("Microphone error: " + err.message);
-            addMessageToChat("System", "Error accessing microphone. Please ensure your browser has permission to use the microphone.");
+            console.error("Speech recognition error:", err);
+            logDebug("Speech recognition error: " + err.message);
+            addMessageToChat("System", "Error: Speech recognition not available in this browser. Please try Chrome, Edge, or Safari.");
             setEnableMic(false);
         }
     };
 
-    // Start recording user's speech
-    const startRecording = () => {
-        if (recorder.current && !isRecording) {
-            recorder.current.startRecording();
-            setIsRecording(true);
-            logDebug("Started recording");
+    const startListening = () => {
+        if (!recognitionRef.current) return;
+        
+        const recognition = recognitionRef.current;
+        
+        // Define event handlers
+        recognition.onstart = () => {
+            setIsListening(true);
+            logDebug("Speech recognition started");
             addMessageToChat("System", "Listening... (speak your answer)");
-            
-            // Set a maximum recording duration (e.g., 30 seconds)
-            recordingTimer.current = setTimeout(() => {
-                if (isRecording) {
-                    logDebug("Max duration reached, stopping recording");
-                    stopRecording();
-                }
-            }, 30000); // 30 seconds max recording
-            
-            // Setup a timer to check for silence 
-            startSilenceDetection();
-        }
-    };
-    
-    // Simple approach - use a timer to automatically stop after a period of silence
-    const startSilenceDetection = () => {
-        // Automatically stop after 3 seconds of silence (adjust as needed)
-        silenceTimeOut.current = setTimeout(() => {
-            logDebug("Silence detected, stopping recording");
-            stopRecording();
-        }, 3000);
-    };
-
-    // Stop recording and send audio to AssemblyAI for transcription
-    const stopRecording = async () => {
-        clearTimeout(recordingTimer.current);
-        clearTimeout(silenceTimeOut.current);
+        };
         
-        if (recorder.current && isRecording) {
-            setIsRecording(false);
-            logDebug("Stopping recording");
+        recognition.onresult = (event) => {
+            const transcript = event.results[0][0].transcript;
+            const confidence = event.results[0][0].confidence;
             
-            recorder.current.stopRecording(async () => {
-                const blob = recorder.current.getBlob();
-                logDebug(`Recording stopped. Blob size: ${blob.size} bytes`);
-                const audioUrl = URL.createObjectURL(blob);
-                addMessageToChat("You", "🎤 Here's your recorded response:", audioUrl);
-                try {
-                  const transcript = await transcribeAudio(blob);
-                  addMessageToChat("You", transcript);  // <-- ✅ This line adds the transcript to chat
-          
-                  const feedback = await getInterviewFeedback(transcript);
-                  addMessageToChat("System", `Interview Feedback: ${feedback}`);
-              } catch (error) {
-                  logDebug(`Error during transcription or feedback: ${error}`);
-                  addMessageToChat("System", "❌ Failed to process the recording.");
-              }
-          
-              stopStream();
-                // Only process if the blob has data (more than just a few bytes)
-                if (blob.size > 1000) {
-                    await transcribeAudio(blob);
-                } else {
-                    logDebug("Recording too short, ignoring");
-                    // Start a new recording session after a short delay
-                    setTimeout(() => {
-                        if (enableMic) startRecording();
-                    }, 500);
-                }
-            });
-        }
-    };
-
-    // Send audio to AssemblyAI for transcription
-    const transcribeAudio = async (audioBlob) => {
-      setIsProcessing(true);
-      addMessageToChat("System", "Processing your audio...");
-  
-      try {
-          const token = await getToken();
-          logDebug("Got API token");
-  
-          // Upload the blob directly
-          const uploadResponse = await fetch("https://api.assemblyai.com/v2/upload", {
-              method: "POST",
-              headers: {
-                  authorization: token,
-                  "transfer-encoding": "chunked",
-                  "content-type": "application/octet-stream"
-              },
-              body: audioBlob
-          });
-  
-          if (!uploadResponse.ok) {
-              throw new Error(`Upload failed with status: ${uploadResponse.status}`);
-          }
-  
-          const { upload_url } = await uploadResponse.json();
-          logDebug(`Audio uploaded. URL: ${upload_url}`);
-  
-          // Start transcription
-          const transcriptResponse = await fetch("https://api.assemblyai.com/v2/transcript", {
-              method: "POST",
-              headers: {
-                  authorization: token,
-                  "content-type": "application/json"
-              },
-              body: JSON.stringify({ audio_url: upload_url })
-          });
-  
-          if (!transcriptResponse.ok) {
-              throw new Error(`Transcription request failed with status: ${transcriptResponse.status}`);
-          }
-  
-          const { id: transcriptId } = await transcriptResponse.json();
-          logDebug(`Transcription started. ID: ${transcriptId}`);
-  
-          // Poll for result
-          const result = await checkTranscriptionStatus(transcriptId, token);
-  
-          if (result.text && result.text.trim()) {
-              setTranscribedText(result.text);
-              addMessageToChat("You", result.text);
-              await generateAIResponse(result.text);
-          } else {
-              addMessageToChat("System", "No speech detected. Please try again.");
-          }
-      } catch (error) {
-          console.error("Transcription error:", error);
-          addMessageToChat("System", `Error transcribing audio: ${error.message}`);
-      } finally {
-          setIsProcessing(false);
-          if (enableMic) {
-              setTimeout(() => startRecording(), 1000);
-          }
-      }
-  };
-  
-
-    // Poll for transcription status
-    const checkTranscriptionStatus = async (transcriptId, token) => {
-        const pollingEndpoint = `https://api.assemblyai.com/v2/transcript/${transcriptId}`;
-        let attempts = 0;
-        
-        while (true) {
-            attempts++;
-            logDebug(`Polling attempt ${attempts}...`);
+            logDebug(`Speech recognized: "${transcript}" (confidence: ${confidence.toFixed(2)})`);
             
-            const pollingResponse = await fetch(pollingEndpoint, {
-                method: 'GET',
-                headers: {
-                    'authorization': token
-                }
-            });
-            
-            const transcriptionResult = await pollingResponse.json();
-            logDebug(`Poll result: status = ${transcriptionResult.status}`);
-            
-            if (transcriptionResult.status === 'completed') {
-                return transcriptionResult;
-            } else if (transcriptionResult.status === 'error') {
-                throw new Error(`Transcription failed: ${transcriptionResult.error}`);
+            if (transcript && transcript.trim()) {
+                addMessageToChat("You", transcript);
+                processUserResponse(transcript);
             } else {
-                // Wait before polling again
-                logDebug("Waiting before next poll...");
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                
-                // Safety check - don't poll forever
-                if (attempts > 30) {
-                    throw new Error("Transcription timed out after 30 polling attempts");
-                }
+                logDebug("Empty transcript, retrying...");
+                // If no speech detected, restart listening
+                setTimeout(() => {
+                    if (enableMic) startListening();
+                }, 1000);
             }
-        }
-    };
-
-    // Generate AI response based on transcription
-    const generateAIResponse = async (userText) => {
-        // This is where you would integrate with your AI interviewer
-        // For now, we'll just simulate a response
-        setIsProcessing(true);
-        logDebug("Generating AI response...");
+        };
         
+        recognition.onerror = (event) => {
+            logDebug(`Recognition error: ${event.error}`);
+            
+            // Don't show error to user unless it's a critical error
+            if (event.error !== 'no-speech') {
+                addMessageToChat("System", `Speech recognition error: ${event.error}`);
+            }
+            
+            // Restart listening if it was just a temporary error
+            if (enableMic && ['no-speech', 'audio-capture', 'network'].includes(event.error)) {
+                setTimeout(() => startListening(), 1000);
+            }
+        };
+        
+        recognition.onend = () => {
+            setIsListening(false);
+            logDebug("Speech recognition ended");
+            
+            // Don't automatically restart here - we'll restart after processing
+        };
+        
+        // Start the recognition
         try {
-            // Simulate API call to get AI response
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            recognition.start();
+        } catch (err) {
+            logDebug(`Error starting recognition: ${err.message}`);
+            // If there's an error (like recognition is already running), wait and retry
+            setTimeout(() => {
+                if (enableMic) startListening();
+            }, 1000);
+        }
+    };
+
+    const processUserResponse = async (transcript) => {
+        try {
+            setIsProcessing(true);
             
-            // Mock interview questions based on user input
-            let aiResponse;
-            if (userText.toLowerCase().includes("hello") || userText.toLowerCase().includes("hi") || 
-                userText.toLowerCase().includes("introduction") || userText.toLowerCase().includes("myself")) {
-                aiResponse = "Thank you for the introduction. Could you tell me about a challenging project you've worked on recently?";
-            } else if (userText.toLowerCase().includes("experience") || userText.toLowerCase().includes("background") || 
-                     userText.toLowerCase().includes("project") || userText.toLowerCase().includes("work")) {
-                aiResponse = "That's impressive! What would you say are your key strengths relevant to this position?";
-            } else if (userText.toLowerCase().includes("strength") || userText.toLowerCase().includes("skill") ||
-                      userText.toLowerCase().includes("good at")) {
-                aiResponse = "Great. Can you describe a situation where you had to overcome a significant obstacle at work?";
-            } else if (userText.toLowerCase().includes("challenge") || userText.toLowerCase().includes("obstacle") ||
-                      userText.toLowerCase().includes("difficult")) {
-                aiResponse = "Thank you for sharing that experience. Now, what interests you most about this position?";
-            } else if (userText.toLowerCase().includes("interest") || userText.toLowerCase().includes("excited") ||
-                      userText.toLowerCase().includes("like about")) {
-                aiResponse = "Where do you see yourself professionally in the next 3-5 years?";
-            } else {
-                aiResponse = "I appreciate your response. Do you have any questions about the role or the company culture?";
-            }
+            // Add user's message to conversation history
+            conversationHistoryRef.current.push({ role: "user", content: transcript });
             
-            logDebug(`AI response generated: "${aiResponse}"`);
-            
-            // Add AI response to chat
-            addMessageToChat(expert?.name || "Interviewer", aiResponse);
+            // Generate AI response
+            await generateAIResponse(transcript);
             
         } catch (error) {
-            console.error("Error generating AI response:", error);
-            logDebug(`AI response error: ${error.message}`);
-            addMessageToChat("System", "Error generating interviewer response.");
+            console.error("Error processing response:", error);
+            logDebug(`Processing error: ${error.message}`);
+            addMessageToChat("System", "Error processing your response.");
         } finally {
             setIsProcessing(false);
         }
     };
 
-    // Add a message to the chat history
-    const addMessageToChat = (sender, text, audioUrl = null) => {
-      logDebug(`Adding message to chat - ${sender}: ${text}`);
-      setChatMessages(prevMessages => [
-          ...prevMessages, 
-          { sender, text, audioUrl, timestamp: new Date() }
-      ]);
-  };
+    const generateAIResponse = async (userText) => {
+        logDebug("Generating AI response...");
 
-    const disconnect = (e) => {
-        e.preventDefault();
-        logDebug("Disconnecting...");
-        
-        // Stop recording and clean up
-        if (recorder.current) {
-            recorder.current.stopRecording();
-            recorder.current = null;
+        try {
+            // Always use your AI model, even in development
+            const aiResponse = await AIModel(
+                DiscussionRoomData?.topic,
+                DiscussionRoomData?.coachingOption,
+                userText,
+                conversationHistoryRef.current // Full chat history for better context
+            );
+    
+            logDebug(`AI response generated: "${aiResponse}"`);
+    
+            // Add AI response to chat and memory
+            addMessageToChat(expert?.name || "Interviewer", aiResponse);
+            conversationHistoryRef.current.push({ role: "assistant", content: aiResponse });
+    
+        } catch (error) {
+            console.error("Error generating AI response:", error);
+            logDebug(`AI response error: ${error.message}`);
+            addMessageToChat("System", "Sorry, there was an issue generating the AI's response.");
+        } finally {
+            // Continue the conversation
+            setTimeout(() => {
+                if (enableMic) startListening();
+            }, 1000);
         }
+    };        
+            
+            // // In development, use mock responses for quick testing
+            // if (process.env.NODE_ENV === 'development') {
+            //     // Simple keyword-based response logic for development/testing
+            //     const userTextLower = userText.toLowerCase();
+                
+            //     if (userTextLower.includes("hello") || userTextLower.includes("hi") || 
+            //         userTextLower.includes("introduction") || userTextLower.includes("myself")) {
+            //         aiResponse = "Thank you for the introduction. Could you tell me about a challenging project you've worked on recently?";
+            //     } else if (userTextLower.includes("experience") || userTextLower.includes("background") || 
+            //              userTextLower.includes("project") || userTextLower.includes("work")) {
+            //         aiResponse = "That's impressive! What would you say are your key strengths relevant to this position?";
+            //     } else if (userTextLower.includes("strength") || userTextLower.includes("skill") ||
+            //               userTextLower.includes("good at")) {
+            //         aiResponse = "Great. Can you describe a situation where you had to overcome a significant obstacle at work?";
+            //     } else if (userTextLower.includes("challenge") || userTextLower.includes("obstacle") ||
+            //               userTextLower.includes("difficult")) {
+            //         aiResponse = "Thank you for sharing that experience. Now, what interests you most about this position?";
+            //     } else if (userTextLower.includes("interest") || userTextLower.includes("excited") ||
+            //               userTextLower.includes("like about")) {
+            //         aiResponse = "Where do you see yourself professionally in the next 3-5 years?";
+            //     } else {
+            //         aiResponse = "I appreciate your response. Do you have any questions about the role or the company culture?";
+            //     }
+                
+            //     // Add artificial delay to simulate API call
+            //     await new Promise(resolve => setTimeout(resolve, 1500)); } else {
+                // In production, use the real AI model
+
+    const addMessageToChat = (sender, text, audioUrl = null) => {
+        setChatMessages(prevMessages => [
+            ...prevMessages, 
+            { sender, text, audioUrl, timestamp: new Date() }
+        ]);
+    };
+
+    const disconnect = () => {
+        logDebug("Ending interview session...");
         
-        // Stop all tracks in the media stream
-        if (streamRef.current) {
-            streamRef.current.getTracks().forEach(track => track.stop());
-            streamRef.current = null;
+        // Stop speech recognition
+        if (recognitionRef.current) {
+            recognitionRef.current.stop();
+            recognitionRef.current = null;
         }
-        
-        // Clear timers
-        clearTimeout(silenceTimeOut.current);
-        clearTimeout(recordingTimer.current);
         
         // Reset state
         setEnableMic(false);
-        setIsRecording(false);
+        setIsListening(false);
         
         // Add message to chat
         addMessageToChat("System", "Interview session ended.");
         
-        // Here you could generate feedback based on the interview
-        setTimeout(() => {
-            addMessageToChat("System", "Interview Feedback: You presented yourself well and provided thoughtful answers. Consider being more specific about your achievements and using the STAR method (Situation, Task, Action, Result) when describing your experiences.");
+        // Generate interview feedback based on the conversation
+        setTimeout(async () => {
+            let feedback;
+            
+            try {
+                // In development, use mock feedback
+                if (process.env.NODE_ENV === 'development') {
+                    feedback = "Interview Feedback: You presented yourself well and provided thoughtful answers. Consider being more specific about your achievements and using the STAR method when describing your experiences.";
+                } else {
+                    // In production, generate feedback based on the conversation
+                    const userResponses = conversationHistoryRef.current
+                        .filter(msg => msg.role === "user")
+                        .map(msg => msg.content)
+                        .join(" ");
+                        
+                    // Use your AI feedback function here or another approach
+                    feedback = await getInterviewFeedback(userResponses);
+                }
+                
+                addMessageToChat("System", feedback);
+            } catch (error) {
+                console.error("Error generating feedback:", error);
+                addMessageToChat("System", "Unable to generate detailed feedback. Thank you for participating in this interview practice session.");
+            }
         }, 2000);
+    };
+
+    // Placeholder for feedback function if not using the one from GlobalServices
+    const getInterviewFeedback = async (responseText) => {
+        // In a real implementation, this would call your AI model
+        return "Interview Feedback: You provided detailed responses and demonstrated enthusiasm. Work on structuring your answers more concisely using the STAR method where applicable.";
     };
 
     return (
@@ -377,15 +308,21 @@ function DiscussionRoom() {
                             <UserButton />
                         </div>
                         <div className='absolute bottom-10 left-10'>
-                            {isRecording && <p className='text-green-500 font-medium'>Recording...</p>}
-                            {isProcessing && <p className='text-blue-500 font-medium'>Processing...</p>}
+                            {isListening && <p className='text-green-500 font-medium flex items-center'>
+                                <span className="w-3 h-3 bg-green-500 rounded-full mr-2 animate-pulse"></span>
+                                Listening...
+                            </p>}
+                            {isProcessing && <p className='text-blue-500 font-medium flex items-center'>
+                                <span className="w-3 h-3 bg-blue-500 rounded-full mr-2 animate-pulse"></span>
+                                Processing...
+                            </p>}
                         </div>
                     </div>
                     <div className='mt-5 flex items-center justify-center gap-4'>
                         {!enableMic ? 
-                            <Button onClick={startMicrophone}>Start Interview</Button>
+                            <Button onClick={startSpeechRecognition} className="px-6 py-2">Start Interview</Button>
                             :
-                            <Button variant="destructive" onClick={disconnect}>End Interview</Button>
+                            <Button variant="destructive" onClick={disconnect} className="px-6 py-2">End Interview</Button>
                         }
                     </div>
                 </div>
@@ -393,18 +330,21 @@ function DiscussionRoom() {
                     <div className='h-[60vh] bg-secondary border rounded-4xl
                     flex flex-col p-4 relative'>
                         <h2 className='text-center font-bold mb-4'>Interview Conversation</h2>
-                        <div className='flex-1 overflow-y-auto'>
+                        <div 
+                            ref={chatContainerRef}
+                            className='flex-1 overflow-y-auto'
+                        >
                             {chatMessages.map((msg, index) => (
                                 <div key={index} className={`mb-3 ${msg.sender === 'You' ? 'text-right' : 'text-left'}`}>
-                                    <div className={`inline-block p-2 rounded-lg max-w-3/4 ${
+                                    <div className={`inline-block p-2 rounded-lg max-w-[75%] ${
                                         msg.sender === 'You' ? 'bg-blue-100' : 
                                         msg.sender === 'System' ? 'bg-gray-100 italic text-gray-500 text-sm' : 'bg-green-100'
                                     }`}>
                                         {msg.sender !== 'System' && <p className='font-bold text-xs'>{msg.sender}</p>}
                                         <p>{msg.text}</p>
                                         {msg.audioUrl && (
-                                          <audio controls src={msg.audioUrl} className="mt-2 w-full rounded" />
-                                        )}  
+                                            <audio controls src={msg.audioUrl} className="mt-2 w-full rounded h-8" />
+                                        )}
                                     </div>
                                 </div>
                             ))}
